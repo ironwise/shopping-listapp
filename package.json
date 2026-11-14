@@ -1,0 +1,21 @@
+{
+  "name": "shopping-list",
+  "version": "1.0.0",
+  "private": true,
+  "description": "아이템 추가·삭제·체크가 되는 단일 파일 쇼핑 리스트 웹 앱",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "serve": "node serve.js",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:headed": "playwright test --headed",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "pptxgenjs": "^4.0.1"
+  }
+}
