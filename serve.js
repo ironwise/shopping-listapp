@@ -1,5 +1,5 @@
 /**
- * shopping-list.html 을 띄우는 최소 정적 서버.
+ * index.html 을 띄우는 최소 정적 서버.
  *
  * 왜 필요한가: `file://` 로는 테스트할 수 없다. Playwright 도 Chrome 확장도
  * `file:` 프로토콜 접근을 막는다("Access to file: protocol is blocked").
@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const FILE = path.join(ROOT, 'shopping-list.html');
+const FILE = path.join(ROOT, 'index.html');
 const PORT = Number(process.env.PORT ?? 4173);
 
 const server = http.createServer(async (req, res) => {
@@ -29,7 +29,7 @@ const server = http.createServer(async (req, res) => {
     res.end(req.method === 'HEAD' ? undefined : html);
   } catch (err) {
     res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(`shopping-list.html 을 읽을 수 없습니다: ${err.code ?? err.message}`);
+    res.end(`index.html 을 읽을 수 없습니다: ${err.code ?? err.message}`);
   }
 });
 
