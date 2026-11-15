@@ -11,3 +11,6 @@ node_modules/
 make-deck.cjs
 *.pptx
 slide-*.png
+
+# 로컬 Claude Code 설정
+.claude/
