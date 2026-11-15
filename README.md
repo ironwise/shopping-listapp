@@ -18,7 +18,9 @@
 
 ## 쓰는 법
 
-`index.html` 을 브라우저로 열면 끝이다.
+바로 써 보기: **https://ironwise.github.io/shopping-listapp/**
+
+내려받았다면 `index.html` 을 브라우저로 열면 끝이다.
 
 개발·테스트용으로 http 로 띄우려면:
 
