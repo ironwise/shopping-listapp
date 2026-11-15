@@ -5,8 +5,8 @@ const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
   testDir: './tests',
-  // 각 테스트가 localStorage 를 비우고 시작하므로 병렬로 돌리면 서로를 지운다.
-  // 같은 origin 을 공유하는 테스트라 순차 실행이 맞다.
+  // 각 테스트가 Supabase 테이블을 비우고 시작하므로 병렬로 돌리면 서로를 지운다.
+  // 테이블 하나를 모두가 공유하는 구조라 순차 실행이 맞다.
   workers: 1,
   fullyParallel: false,
   reporter: [['list']],

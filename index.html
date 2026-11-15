@@ -79,6 +79,7 @@
     outline-offset: 1px;
     border-color: transparent;
   }
+  input[type="text"]:disabled { opacity: .55; cursor: not-allowed; }
   button {
     font: inherit;
     cursor: pointer;
@@ -94,6 +95,32 @@
     white-space: nowrap;
   }
   .add:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ---- 서버 상태 알림 ----
+     로컬 저장과 달리 네트워크는 느리거나 실패한다. 그 사실을 숨기지 않는다. */
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .7rem .875rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--muted);
+    font-size: .875rem;
+  }
+  .banner.error {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, transparent);
+  }
+  .banner span { min-width: 0; overflow-wrap: anywhere; }
+  .banner .retry {
+    flex: none;
+    margin-left: auto;
+    padding: .35rem .6rem;
+    font-size: .8rem;
+    background: transparent;
+    color: inherit;
+    border-color: currentColor;
+  }
 
   /* ---- 목록 ---- */
   ul { list-style: none; margin: 0; padding: 0; }
@@ -176,19 +203,24 @@
 <div class="wrap">
   <header>
     <h1>쇼핑 리스트</h1>
-    <p class="count" id="count">항목이 없습니다</p>
+    <p class="count" id="count">불러오는 중…</p>
   </header>
 
   <div class="card">
     <form id="form" autocomplete="off">
       <label class="sr" for="input">살 물건</label>
-      <input id="input" type="text" placeholder="살 물건을 입력하세요" maxlength="100">
+      <input id="input" type="text" placeholder="살 물건을 입력하세요" maxlength="100" disabled>
       <button type="submit" class="add" id="addBtn" disabled>추가</button>
     </form>
 
+    <div class="banner" id="banner" hidden>
+      <span id="bannerText"></span>
+      <button type="button" class="retry" id="retry" hidden>다시 시도</button>
+    </div>
+
     <ul id="list"></ul>
 
-    <div class="empty" id="empty">
+    <div class="empty" id="empty" hidden>
       <p>아직 담은 물건이 없습니다.</p>
     </div>
   </div>
@@ -206,7 +238,19 @@
 (() => {
   'use strict';
 
-  const STORAGE_KEY = 'shopping-list.items.v1';
+  /* ---------- Supabase ----------
+     URL 과 publishable 키는 공개되는 값이다. 정적 페이지라 브라우저로 그대로
+     내려가는 걸 전제로 만들어진 키이고, 실제 접근 제어는 테이블의 RLS 정책이 한다.
+
+     다만 이 앱에는 로그인이 없어서 RLS 를 anon 에게 전부 열어 두었다 —
+     즉 이 페이지를 여는 모든 사람이 목록 하나를 함께 쓴다. 사용자별로 나누려면
+     Supabase Auth 를 붙이고 user_id 로 정책을 좁혀야 한다. */
+  const SUPABASE_URL = 'https://ygmumpdtokurnxbkwswg.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_oUXULpKTwbzeWKjA2QbN0A_U5yNIaLF';
+  const ENDPOINT = `${SUPABASE_URL}/rest/v1/shopping_items`;
+
+  // 예전 버전이 쓰던 localStorage 키. 남아 있으면 첫 로드에서 서버로 옮긴다.
+  const LEGACY_KEY = 'shopping-list.items.v1';
   const MAX_LEN = 100;
 
   const $form = document.getElementById('form');
@@ -218,46 +262,91 @@
   const $clearDone = document.getElementById('clearDone');
   const $clearAll = document.getElementById('clearAll');
   const $live = document.getElementById('live');
+  const $banner = document.getElementById('banner');
+  const $bannerText = document.getElementById('bannerText');
+  const $retry = document.getElementById('retry');
 
   /** @type {{id: string, name: string, done: boolean}[]} */
-  let items = load();
+  let items = [];
+  let ready = false; // 첫 로드가 끝났는가 — 끝나기 전에는 입력을 받지 않는다
 
-  /* ---------- 저장소 ----------
-     사생활 보호 모드나 사이트 데이터 차단 설정에서는 접근 자체가 예외를 던진다.
-     저장이 안 되더라도 앱은 그대로 동작해야 하므로 전부 감싼다. */
+  /* ---------- 서버 ----------
+     PostgREST 를 fetch 로 바로 부른다. supabase-js 를 쓰지 않는 이유는
+     이 앱이 빌드 없는 단일 파일이고, CDN 모듈 import 는 `file://` 로 열면 막히기 때문이다. */
 
-  function load() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return [];
-      // 저장된 값도 외부 입력으로 본다. 모양이 맞는 것만 살린다.
-      return parsed
-        .filter((it) => it && typeof it.name === 'string')
-        .map((it) => ({
-          id: typeof it.id === 'string' ? it.id : newId(),
-          name: it.name.slice(0, MAX_LEN),
-          done: it.done === true,
-        }));
-    } catch {
-      return [];
+  async function send(query = '', options = {}) {
+    const res = await fetch(ENDPOINT + query, {
+      ...options,
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    });
+
+    if (!res.ok) {
+      // PostgREST 는 오류를 JSON 으로 준다. message 를 쓰고, 없으면 상태 코드로 대신한다.
+      let message = '';
+      try {
+        message = (await res.json())?.message ?? '';
+      } catch { /* 본문이 없거나 JSON 이 아니다 */ }
+      throw new Error(message || `${res.status} ${res.statusText}`);
     }
+    return res;
   }
 
-  function save() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    } catch {
-      /* 저장 실패는 무시한다 — 이번 세션에서는 계속 쓸 수 있다 */
-    }
+  const byId = (value) => `?id=eq.${encodeURIComponent(value)}`;
+
+  const db = {
+    async list() {
+      // id 는 동점자 처리용이다 — 시계가 다른 브라우저끼리도 순서가 흔들리지 않는다.
+      const res = await send('?select=id,name,done&order=created_at.asc,id.asc');
+      return res.json();
+    },
+    insert: (rows) => send('', { method: 'POST', body: JSON.stringify(rows) }),
+    update: (id, patch) => send(byId(id), { method: 'PATCH', body: JSON.stringify(patch) }),
+    remove: (id) => send(byId(id), { method: 'DELETE' }),
+    removeDone: () => send('?done=eq.true', { method: 'DELETE' }),
+    // PostgREST 는 조건 없는 DELETE 를 막지 않지만, 전체 삭제라는 의도를 조건으로 적어 둔다.
+    removeAll: () => send('?id=not.is.null', { method: 'DELETE' }),
+  };
+
+  // 서버 응답도 외부 입력으로 본다. 모양이 맞는 것만 살린다.
+  function normalize(rows) {
+    if (!Array.isArray(rows)) return [];
+    return rows
+      .filter((row) => row && typeof row.id === 'string' && typeof row.name === 'string')
+      .map((row) => ({ id: row.id, name: row.name.slice(0, MAX_LEN), done: row.done === true }));
   }
 
   function newId() {
     return (crypto.randomUUID?.() ?? String(Date.now() + Math.random()));
   }
 
+  function clean(raw) {
+    return raw.trim().replace(/\s+/g, ' ').slice(0, MAX_LEN);
+  }
+
+  /* 추가 순서를 created_at 에 직접 적는다.
+     서버 기본값 now() 에 맡기면 안 되는 이유: 요청을 기다리지 않고 바로 다음 입력을
+     받으므로 여러 POST 가 동시에 날아가고, 서버에 닿는 순서가 입력 순서와 달라진다.
+     그러면 새로고침했을 때 적어 둔 순서가 뒤바뀐다.
+     같은 밀리초에 두 개가 들어오더라도 섞이지 않게 1ms 씩 밀어 준다. */
+  let lastStamp = 0;
+  function nextStamp() {
+    lastStamp = Math.max(Date.now(), lastStamp + 1);
+    return new Date(lastStamp).toISOString();
+  }
+
   /* ---------- 렌더 ---------- */
+
+  function setBanner(text, { error = false, retry = false } = {}) {
+    $banner.hidden = !text;
+    $banner.classList.toggle('error', error);
+    $bannerText.textContent = text ?? '';
+    $retry.hidden = !retry;
+  }
 
   function render(flashId = null) {
     $list.replaceChildren();
@@ -297,59 +386,163 @@
     const total = items.length;
     const left = items.filter((it) => !it.done).length;
 
-    $empty.hidden = total > 0;
-    $count.textContent = total === 0
-      ? '항목이 없습니다'
-      : `${left}개 남음 · 전체 ${total}개`;
+    // 로드 전에는 "항목이 없습니다" 를 보여주지 않는다 — 빈 목록인지 아직 모른다.
+    $empty.hidden = total > 0 || !ready;
+    $count.textContent = !ready
+      ? '불러오는 중…'
+      : total === 0
+        ? '항목이 없습니다'
+        : `${left}개 남음 · 전체 ${total}개`;
 
-    $clearAll.disabled = total === 0;
-    $clearDone.disabled = total === left;
+    $input.disabled = !ready;
+    $addBtn.disabled = !ready || $input.value.trim() === '';
+    $clearAll.disabled = !ready || total === 0;
+    $clearDone.disabled = !ready || total === left;
   }
 
   function announce(message) {
     $live.textContent = message;
   }
 
-  /* ---------- 동작 ---------- */
+  /* ---------- 동작 ----------
+     화면을 먼저 바꾸고 서버에 반영한다. 체크 한 번마다 왕복 지연이 그대로 보이면
+     쓰기 불편하기 때문이다. 실패하면 바꾸기 전 상태로 되돌리고 알린다. */
+
+  async function mutate(apply, request, failure, flashId = null) {
+    const snapshot = items.map((it) => ({ ...it }));
+    apply();
+    render(flashId);
+    try {
+      await request();
+      setBanner(null);
+    } catch (err) {
+      items = snapshot;
+      render();
+      setBanner(`${failure} (${err.message})`, { error: true });
+      announce(failure);
+    }
+  }
 
   function add(rawName) {
-    const name = rawName.trim().replace(/\s+/g, ' ').slice(0, MAX_LEN);
+    const name = clean(rawName);
     if (!name) return;
 
     // 같은 물건을 두 번 담는 건 실수일 때가 많다. 추가하는 대신 기존 항목을 알려준다.
     const existing = items.find((it) => it.name.toLowerCase() === name.toLowerCase());
     if (existing) {
-      // 이미 체크해 둔 물건을 다시 입력했다면 "또 필요하다"는 뜻이므로 체크를 푼다.
-      existing.done = false;
-      save();
-      render(existing.id);
       announce(`${name}은(는) 이미 목록에 있습니다`);
+      if (!existing.done) {
+        render(existing.id);
+        return;
+      }
+      // 이미 체크해 둔 물건을 다시 입력했다면 "또 필요하다"는 뜻이므로 체크를 푼다.
+      mutate(
+        () => { existing.done = false; },
+        () => db.update(existing.id, { done: false }),
+        '변경을 저장하지 못했습니다',
+        existing.id,
+      );
       return;
     }
 
+    // id 를 브라우저에서 만든다 — 서버 응답을 기다리지 않고 바로 그릴 수 있다.
     const item = { id: newId(), name, done: false };
-    items.push(item);
-    save();
-    render();
+    const row = { ...item, created_at: nextStamp() };
     announce(`${name} 추가됨`);
+    mutate(
+      () => { items.push(item); },
+      () => db.insert(row),
+      `${name} 추가를 저장하지 못했습니다`,
+    );
   }
 
   function toggle(id) {
     const item = items.find((it) => it.id === id);
     if (!item) return;
-    item.done = !item.done;
-    save();
-    render();
-    announce(`${item.name} ${item.done ? '완료' : '완료 취소'}`);
+    const done = !item.done;
+    announce(`${item.name} ${done ? '완료' : '완료 취소'}`);
+    mutate(
+      () => { item.done = done; },
+      () => db.update(id, { done }),
+      '변경을 저장하지 못했습니다',
+    );
   }
 
   function remove(id) {
     const item = items.find((it) => it.id === id);
     if (!item) return;
-    items = items.filter((it) => it.id !== id);
-    save();
-    render();
     announce(`${item.name} 삭제됨`);
+    mutate(
+      () => { items = items.filter((it) => it.id !== id); },
+      () => db.remove(id),
+      `${item.name} 삭제를 저장하지 못했습니다`,
+    );
+  }
+
+  /* ---------- 첫 로드 ---------- */
+
+  async function load() {
+    ready = false;
+    setBanner('목록을 불러오는 중…');
+    render();
+
+    try {
+      items = normalize(await db.list());
+    } catch (err) {
+      setBanner(`목록을 불러오지 못했습니다 (${err.message})`, { error: true, retry: true });
+      return;
+    }
+
+    ready = true;
+    setBanner(null);
+    render();
+    $input.focus();
+    await adoptLegacyItems();
+  }
+
+  /* 예전 버전은 localStorage 에 저장했다. 남아 있으면 한 번 서버로 옮긴다 —
+     업데이트했다고 해서 적어 둔 목록이 사라지면 안 된다. */
+  async function adoptLegacyItems() {
+    let legacy;
+    try {
+      const raw = localStorage.getItem(LEGACY_KEY);
+      if (!raw) return;
+      legacy = JSON.parse(raw);
+    } catch {
+      // 접근이 막혔거나 값이 깨졌다. 옮길 게 없다고 본다.
+      return;
+    }
+
+    const rows = [];
+    if (Array.isArray(legacy)) {
+      const taken = new Set(items.map((it) => it.name.toLowerCase()));
+      for (const it of legacy) {
+        if (!it || typeof it.name !== 'string') continue;
+        const name = clean(it.name);
+        if (!name || taken.has(name.toLowerCase())) continue;
+        taken.add(name.toLowerCase());
+        // 한 번에 넣으면 기본값 now() 가 전부 같아진다. 적어 둔 순서를 그대로 지킨다.
+        rows.push({ id: newId(), name, done: it.done === true, created_at: nextStamp() });
+      }
+    }
+
+    try {
+      if (rows.length > 0) {
+        await db.insert(rows);
+        items = items.concat(normalize(rows)); // created_at 은 메모리에 들고 있지 않는다
+        render();
+        setBanner(`이 브라우저에 저장돼 있던 ${rows.length}개 항목을 서버로 옮겼습니다`);
+        announce(`이전 항목 ${rows.length}개를 옮겼습니다`);
+      }
+    } catch (err) {
+      // 실패하면 키를 남겨 둔다 — 다음에 열 때 다시 시도한다.
+      setBanner(`이전 항목을 옮기지 못했습니다 (${err.message})`, { error: true });
+      return;
+    }
+
+    try {
+      localStorage.removeItem(LEGACY_KEY);
+    } catch { /* 지우지 못해도 이름이 겹치면 두 번 옮기지 않는다 */ }
   }
 
   /* ---------- 이벤트 ---------- */
@@ -363,30 +556,36 @@
   });
 
   $input.addEventListener('input', () => {
-    $addBtn.disabled = $input.value.trim() === '';
+    $addBtn.disabled = !ready || $input.value.trim() === '';
   });
+
+  $retry.addEventListener('click', () => { load(); });
 
   $clearDone.addEventListener('click', () => {
     const removed = items.filter((it) => it.done).length;
     if (removed === 0) return;
-    items = items.filter((it) => !it.done);
-    save();
-    render();
     announce(`완료 항목 ${removed}개 삭제됨`);
+    mutate(
+      () => { items = items.filter((it) => !it.done); },
+      () => db.removeDone(),
+      '완료 항목 삭제를 저장하지 못했습니다',
+    );
   });
 
   $clearAll.addEventListener('click', () => {
     if (items.length === 0) return;
     // 전체 삭제는 되돌리기 어렵다. 한 번 묻는다.
     if (!confirm('목록을 전부 지울까요?')) return;
-    items = [];
-    save();
-    render();
     announce('전체 삭제됨');
+    mutate(
+      () => { items = []; },
+      () => db.removeAll(),
+      '전체 삭제를 저장하지 못했습니다',
+    );
   });
 
   render();
-  $input.focus();
+  load();
 })();
 </script>
 </body>
